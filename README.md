@@ -24,7 +24,6 @@ A comprehensive Python tool to scrape all projects from the Software Development
 ### 1. Clone the Repository
 ```bash
 git clone <your-repo-url>
-cd FYP_Data_Trace
 ```
 
 ### 2. Run the Setup Script
@@ -100,7 +99,7 @@ python enhanced_ai_chatbot.py
 ## 📁 Project Structure
 
 ```
-FYP_Data_Trace/
+/
 ├── 📁 credentials/           # Google Cloud credentials (not in git)
 ├── 📁 output/               # Scraped data and reports
 ├── 📁 ai_cache/             # AI response cache
