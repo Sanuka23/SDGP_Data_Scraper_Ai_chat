@@ -7,6 +7,8 @@ An advanced CLI chatbot with caching, conversation memory, and intelligent proje
 import json
 import os
 import sys
+import time
+import threading
 from typing import Dict, List, Optional, Any
 import google.auth
 from google.auth.transport.requests import Request
@@ -52,6 +54,10 @@ class EnhancedSDGPAIChatbot:
         
         # Conversation memory
         self.conversation_history = deque(maxlen=10)  # Keep last 10 exchanges
+        
+        # Streaming state
+        self.is_streaming = False
+        self.typing_thread = None
         
         # Initialize Vertex AI
         self._initialize_vertex_ai()
@@ -473,6 +479,16 @@ class EnhancedSDGPAIChatbot:
             context += f"AI: {exchange['ai'][:100]}...\n\n"
         
         return context
+
+    def _show_typing_indicator(self, stop_event):
+        """Show typing indicator while AI is thinking."""
+        indicators = ["🤔", "💭", "🧠", "💡", "✨"]
+        i = 0
+        while not stop_event.is_set():
+            print(f"\r🤖 AI is thinking {indicators[i]}", end="", flush=True)
+            time.sleep(0.5)
+            i = (i + 1) % len(indicators)
+        print("\r", end="", flush=True)  # Clear the line
     
     def chat(self, user_input: str) -> str:
         """
@@ -588,6 +604,165 @@ class EnhancedSDGPAIChatbot:
         except Exception as e:
             logger.error(f"❌ Error generating response: {e}")
             return f"I apologize, but I encountered an error while processing your request: {str(e)}"
+
+    def chat_streaming(self, user_input: str, callback=None):
+        """
+        Generate a streaming response to user input using AI.
+        
+        Args:
+            user_input: The user's question or input
+            callback: Optional callback function to handle streaming chunks
+            
+        Yields:
+            Streaming response chunks
+        """
+        try:
+            # Check for special commands first (non-streaming for these)
+            user_input_lower = user_input.lower().strip()
+            
+            # Handle project ID requests
+            if user_input_lower.startswith('details ') or user_input_lower.startswith('project '):
+                words = user_input_lower.split()
+                for word in words:
+                    if word.isdigit() or (word.startswith('project_') and len(word) > 8):
+                        project_id = word
+                        detailed_info = self.get_detailed_project_info(project_id)
+                        if detailed_info:
+                            yield detailed_info
+                        else:
+                            yield f"❌ Project ID '{project_id}' not found. Please check the project ID and try again."
+                        return
+            
+            # Handle special commands
+            if user_input_lower == 'stats':
+                stats = self.get_cache_stats()
+                response = f"""
+📊 **Cache Statistics:**
+- Total summaries: {stats.get('total_summaries', 0)}
+- Cache size: {stats.get('cache_size_mb', 0):.2f} MB
+- Projects processed: {len(self.project_data)}
+"""
+                yield response
+                return
+            
+            if user_input_lower == 'clear cache':
+                self.clear_cache()
+                yield "✅ Cache cleared successfully! All summaries will be regenerated on next run."
+                return
+            
+            if user_input_lower == 'export':
+                export_data = self.export_summaries()
+                yield f"📤 Export data available. Summary: {export_data[:200]}..."
+                return
+            
+            # Get relevant context
+            context = self._get_context_for_query(user_input)
+            conversation_context = self._get_conversation_context()
+            
+            # Create the enhanced full prompt
+            full_prompt = f"""
+            You are an expert AI assistant specialized in analyzing SDGP (Software Development Group Project) projects. 
+            Act as a knowledgeable, empathetic guide who helps users understand and explore these projects effectively.
+            
+            CONTEXT DATA:
+            {context}
+            
+            CONVERSATION HISTORY:
+            {conversation_context}
+            
+            USER QUESTION: {user_input}
+            
+            RESPONSE GUIDELINES - Create a comprehensive, emotionally intelligent response:
+            
+            1. **📊 START WITH OVERVIEW**: Begin with a warm, engaging summary of what you found
+            2. **🔍 DETAILED ANALYSIS**: Provide rich insights about the projects, technologies, and trends
+            3. **📋 PROJECT IDENTIFICATION**: For each relevant project, include:
+               - Project ID (for reference)
+               - 🔗 Direct link to project page: https://www.sdgp.lk/project/[ACTUAL_PROJECT_ID]
+               - Full project title
+               - Key domains and technologies
+               - Brief but compelling description
+            4. **💡 INSIGHTS & TRENDS**: Share patterns, innovations, and interesting observations
+            5. **🎯 ACTIONABLE STEPS**: Provide clear next steps for users who want to:
+               - Get more details about specific projects
+               - Explore similar projects
+               - Understand the technology stack
+               - Learn about project development stages
+               - Visit official project pages
+            6. **🔗 REFERENCE SYSTEM**: Use project IDs like [PROJECT_ID:123] for easy reference
+            7. **📈 COMPARATIVE ANALYSIS**: When relevant, compare projects and highlight unique features
+            8. **🌟 HIGHLIGHT INNOVATIONS**: Emphasize cutting-edge technologies and novel approaches
+            9. **🌐 DIRECT LINKS**: Include clickable links to official SDGP project pages in the project identification section (no separate section needed)
+            
+            EMOTIONAL INTELLIGENCE ELEMENTS:
+            - Be enthusiastic about the innovative projects you discover
+            - Show genuine interest in helping users explore the data
+            - Use encouraging language that makes users want to learn more
+            - Acknowledge the impressive scope and diversity of the SDGP projects
+            
+            STRUCTURE YOUR RESPONSE WITH:
+            - 📊 **Overview & Statistics**
+            - 🔍 **Detailed Project Analysis** (with Project IDs and Direct Links)
+            - 💡 **Key Insights & Trends**
+            - 🎯 **Next Steps & Recommendations**
+            - 🔗 **How to Get More Details**
+            
+            IMPORTANT: Always mention that users can get detailed information about any project by typing "details [PROJECT_ID]" or "project [PROJECT_ID]"
+            
+            Remember: You have access to 209 SDGP projects with detailed summaries. Make users excited about exploring this rich ecosystem of software development innovation!
+            """
+            
+            # Start typing indicator
+            stop_event = threading.Event()
+            typing_thread = threading.Thread(target=self._show_typing_indicator, args=(stop_event,))
+            typing_thread.daemon = True
+            typing_thread.start()
+            
+            try:
+                # Generate streaming response
+                response_stream = self.model.generate_content(full_prompt, stream=True)
+                
+                full_response = ""
+                first_chunk = True
+                
+                # Stream the response
+                for chunk in response_stream:
+                    if hasattr(chunk, 'text') and chunk.text:
+                        # Stop typing indicator on first chunk
+                        if first_chunk:
+                            stop_event.set()
+                            typing_thread.join(timeout=1)
+                            first_chunk = False
+                        
+                        chunk_text = chunk.text
+                        full_response += chunk_text
+                        
+                        # Yield the chunk
+                        yield chunk_text
+                        
+                        # Call callback if provided
+                        if callback:
+                            callback(chunk_text)
+                
+                # Ensure typing indicator is stopped
+                stop_event.set()
+                typing_thread.join(timeout=1)
+                
+            except Exception as e:
+                # Ensure typing indicator is stopped on error
+                stop_event.set()
+                typing_thread.join(timeout=1)
+                raise e
+            
+            # Update conversation history with the full response
+            self._add_to_conversation_history(user_input, full_response)
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating streaming response: {e}")
+            error_msg = f"I apologize, but I encountered an error while processing your request: {e}"
+            yield error_msg
+            if callback:
+                callback(error_msg)
     
     def get_project_by_name(self, project_name: str) -> Optional[Dict]:
         """Find a specific project by name."""
@@ -797,8 +972,17 @@ def main():
                     continue
                 
                 print("🤖 AI: ", end="", flush=True)
-                response = chatbot.chat(user_input)
-                print(response)
+                
+                # Use streaming response for better user experience
+                try:
+                    for chunk in chatbot.chat_streaming(user_input):
+                        print(chunk, end="", flush=True)
+                    print()  # New line after response
+                except Exception as e:
+                    print(f"\n❌ Error during streaming: {e}")
+                    # Fallback to non-streaming response
+                    response = chatbot.chat(user_input)
+                    print(response)
                 
             except KeyboardInterrupt:
                 print("\n👋 Goodbye! Thanks for using Enhanced SDGP AI Chatbot!")
