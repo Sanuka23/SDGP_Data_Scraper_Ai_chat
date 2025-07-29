@@ -23,7 +23,7 @@ A comprehensive Python tool to scrape all projects from the Software Development
 
 ### 1. Clone the Repository
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Sanuka23/SDGP_Data_Scraper_Ai_chat.git
 ```
 
 ### 2. Run the Setup Script
