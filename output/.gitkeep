@@ -1,0 +1,2 @@
+# This file ensures the output directory is tracked in git
+# Output files will be generated here when running the scraper 
